@@ -1,19 +1,26 @@
 """Streamlit UI for the BDD Test Case Generator."""
 
 import io
+import os
 import zipfile
 
+from dotenv import load_dotenv
 import streamlit as st
 
 from src.github_fetcher import fetch_repository_code, parse_github_url
 from src.bdd_generator import generate_bdd_tests
+
+# ── Load environment variables ───────────────────────────────────────────────
+load_dotenv()
+openai_api_key = os.getenv("OPENAI_API_KEY", "")
+github_token = os.getenv("GITHUB_TOKEN") or os.getenv("GIT_HUB_TOKEN")
 
 # ── Page configuration ──────────────────────────────────────────────────────
 st.set_page_config(
     page_title="BDD Test Generator",
     page_icon="🧪",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 # ── Custom CSS ───────────────────────────────────────────────────────────────
@@ -22,38 +29,13 @@ st.markdown(
     <style>
     .stTextInput > label { font-weight: 600; }
     .block-container { padding-top: 2rem; }
+    /* Hide the top bar (Deploy button / toolbar) */
+    header[data-testid="stHeader"] { display: none !important; }
+    [data-testid="stToolbar"] { display: none !important; }
     </style>
     """,
     unsafe_allow_html=True,
 )
-
-# ── Sidebar ──────────────────────────────────────────────────────────────────
-with st.sidebar:
-    st.header("⚙️ Configuration")
-    st.markdown(
-        "Provide your API credentials below. Keys are used only for the current session "
-        "and are never stored."
-    )
-    openai_api_key = st.text_input(
-        "OpenAI API Key *",
-        type="password",
-        placeholder="sk-...",
-        help="Required — used to call gpt-4o-mini for BDD generation.",
-    )
-    github_token = st.text_input(
-        "GitHub Token (optional)",
-        type="password",
-        placeholder="ghp_...",
-        help=(
-            "A personal access token increases the GitHub API rate limit "
-            "and allows access to private repositories."
-        ),
-    )
-    st.divider()
-    st.caption(
-        "ℹ️ The generator analyses source files (Python, JS, TS, Java, Go, …) "
-        "and skips test files, build artifacts, and third-party directories."
-    )
 
 # ── Main area ────────────────────────────────────────────────────────────────
 st.title("🧪 BDD Test Case Generator")
@@ -61,6 +43,10 @@ st.markdown(
     "Enter a GitHub repository URL and branch name, then click **Generate** "
     "to produce Gherkin feature files from the source code."
 )
+
+if not openai_api_key:
+    st.error("⚠️ OPENAI_API_KEY is not set. Add it to your `.env` file or environment variables.")
+    st.stop()
 
 col_url, col_branch = st.columns([3, 1])
 with col_url:
@@ -80,20 +66,15 @@ generate_clicked = st.button(
     "🚀 Generate BDD Tests",
     type="primary",
     use_container_width=True,
-    disabled=not repo_url or not openai_api_key,
+    disabled=not repo_url,
 )
 
 # ── Generation logic ─────────────────────────────────────────────────────────
 if generate_clicked:
-    # Validate inputs
     try:
         parse_github_url(repo_url)
     except ValueError as exc:
         st.error(str(exc))
-        st.stop()
-
-    if not openai_api_key:
-        st.error("Please enter your OpenAI API key in the sidebar.")
         st.stop()
 
     if not branch.strip():
@@ -121,7 +102,7 @@ if generate_clicked:
 
         if not source_files:
             status.update(label="No source files found", state="error")
-            st.warning(
+            st.error(
                 "No supported source files were found in this repository/branch. "
                 "Make sure the URL and branch are correct."
             )

@@ -1,11 +1,13 @@
 """Fetches source code files from a GitHub repository."""
 
+import logging
 import re
 import base64
 from typing import Optional
 
 import requests
 
+LOGGER = logging.getLogger(__name__)
 
 SOURCE_EXTENSIONS = {
     ".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".go",
@@ -20,8 +22,8 @@ SKIP_DIRS = {
 }
 
 MAX_FILES = 30
-MAX_FILE_SIZE_BYTES = 50_000   # 50 KB per file
-MAX_TOTAL_CHARS = 150_000      # 150 KB of text overall
+MAX_FILE_SIZE_BYTES = 200_000  # 200 KB per file
+MAX_TOTAL_CHARS = 500_000      # 500 KB of text overall
 
 
 def parse_github_url(url: str) -> tuple:
@@ -50,6 +52,22 @@ def _make_headers(github_token: Optional[str]) -> dict:
     return headers
 
 
+def _check_rate_limit(response: requests.Response) -> None:
+    """Raise a descriptive error if GitHub API rate limit is exceeded."""
+    if response.status_code == 403:
+        remaining = response.headers.get("X-RateLimit-Remaining", "unknown")
+        if remaining == "0" or "rate limit" in response.text.lower():
+            raise ValueError(
+                "GitHub API rate limit exceeded. "
+                "Add a GITHUB_TOKEN to your .env file to increase the limit."
+            )
+    if response.status_code == 401:
+        raise ValueError(
+            "GitHub API authentication failed. "
+            "Check that your GITHUB_TOKEN is valid."
+        )
+
+
 def _list_repo_files(owner: str, repo: str, branch: str, github_token: Optional[str]) -> list:
     """Return a filtered list of {path, sha, size} dicts from the repo tree."""
     url = (
@@ -62,9 +80,13 @@ def _list_repo_files(owner: str, repo: str, branch: str, github_token: Optional[
             f"Repository or branch not found: {owner}/{repo} @ {branch}. "
             "Check the URL and branch name."
         )
+    _check_rate_limit(response)
     response.raise_for_status()
 
     tree = response.json()
+    if tree.get("truncated"):
+        LOGGER.warning("GitHub tree response is truncated — only partial file list returned.")
+
     selected = []
     for item in tree.get("tree", []):
         if item["type"] != "blob":
@@ -85,9 +107,10 @@ def _list_repo_files(owner: str, repo: str, branch: str, github_token: Optional[
 
         # Skip oversized files
         if item.get("size", 0) > MAX_FILE_SIZE_BYTES:
+            LOGGER.warning("Skipping oversized file: %s (%d bytes)", path, item.get("size", 0))
             continue
 
-        selected.append({"path": path, "sha": item["sha"]})
+        selected.append({"path": path, "sha": item["sha"], "size": item.get("size", 0)})
         if len(selected) >= MAX_FILES:
             break
 
@@ -98,9 +121,22 @@ def _get_file_content(owner: str, repo: str, path: str, branch: str, github_toke
     """Return the decoded text content of a single file."""
     url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={branch}"
     response = requests.get(url, headers=_make_headers(github_token), timeout=30)
+    _check_rate_limit(response)
     response.raise_for_status()
     data = response.json()
-    raw = base64.b64decode(data["content"])
+
+    # GitHub returns content as base64 with newlines; handle missing/empty content gracefully
+    raw_content = data.get("content", "")
+    if not raw_content:
+        # Fallback: try download_url for files GitHub can't base64-encode inline
+        download_url = data.get("download_url")
+        if download_url:
+            dl_response = requests.get(download_url, headers=_make_headers(github_token), timeout=30)
+            dl_response.raise_for_status()
+            return dl_response.text
+        return ""
+
+    raw = base64.b64decode(raw_content)
     return raw.decode("utf-8", errors="replace")
 
 
@@ -124,18 +160,40 @@ def fetch_repository_code(url: str, branch: str, github_token: Optional[str] = N
     owner, repo = parse_github_url(url)
     file_list = _list_repo_files(owner, repo, branch, github_token)
 
+    if not file_list:
+        # Give a helpful hint about size limit too
+        raise ValueError(
+            f"No supported source files found in '{owner}/{repo}' on branch '{branch}'. "
+            f"Files must be ≤ {MAX_FILE_SIZE_BYTES // 1000} KB and use one of these extensions: "
+            f"{', '.join(sorted(SOURCE_EXTENSIONS))}."
+        )
+
     result = {}
     total_chars = 0
+    fetch_errors = []
+
     for file_info in file_list:
         try:
             content = _get_file_content(owner, repo, file_info["path"], branch, github_token)
-        except Exception:
+        except ValueError:
+            # Re-raise auth / rate-limit errors immediately
+            raise
+        except Exception as exc:
+            LOGGER.warning("Could not fetch %s: %s", file_info["path"], exc)
+            fetch_errors.append(f"{file_info['path']}: {exc}")
             continue
 
         total_chars += len(content)
         if total_chars > MAX_TOTAL_CHARS:
+            LOGGER.info("Total character limit reached — stopping early.")
             break
 
         result[file_info["path"]] = content
+
+    if not result and fetch_errors:
+        raise ValueError(
+            f"Found {len(file_list)} source file(s) but could not fetch any content.\n"
+            + "\n".join(fetch_errors)
+        )
 
     return result
