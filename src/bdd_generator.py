@@ -5,7 +5,7 @@ from openai import OpenAI
 
 
 _SYSTEM_PROMPT = (
-    "You are an expert QA engineer specialised in Behaviour-Driven Development (BDD). "
+    "You are an expert QA engineer specialized in Behaviour-Driven Development (BDD). "
     "Your task is to read source code and produce comprehensive Gherkin feature files. "
     "Write clear Feature descriptions, multiple Scenarios (happy path and edge cases), "
     "and use Scenario Outline with Examples tables where repetition exists. "

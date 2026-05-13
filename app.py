@@ -52,7 +52,7 @@ with st.sidebar:
     st.divider()
     st.caption(
         "ℹ️ The generator analyses source files (Python, JS, TS, Java, Go, …) "
-        "and skips test files, build artefacts, and third-party directories."
+        "and skips test files, build artifacts, and third-party directories."
     )
 
 # ── Main area ────────────────────────────────────────────────────────────────
